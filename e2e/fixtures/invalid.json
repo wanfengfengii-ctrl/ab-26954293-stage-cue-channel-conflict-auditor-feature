@@ -1,0 +1,5 @@
+[
+  {"cue": "开场", "channel": 1, "start_ms": 0, "end_ms": 1000},
+  {"cue": "越界通道", "channel": 999, "start_ms": 0, "end_ms": 100},
+  {"cue": "区间倒置", "channel": 2, "start_ms": 50, "end_ms": 50}
+]

@@ -1,0 +1,5 @@
+[
+  {"cue": "开场", "channel": 1, "start_ms": 0, "end_ms": 1000},
+  {"cue": "追光", "channel": 1, "start_ms": 1000, "end_ms": 2000},
+  {"cue": "面光", "channel": 2, "start_ms": 0, "end_ms": 500}
+]

@@ -1,0 +1,5 @@
+[
+  {"cue": "A-长渐变", "channel": 5, "start_ms": 0, "end_ms": 1000},
+  {"cue": "B-远景", "channel": 5, "start_ms": 5000, "end_ms": 6000},
+  {"cue": "C-叠加", "channel": 5, "start_ms": 400, "end_ms": 700}
+]
