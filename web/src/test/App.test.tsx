@@ -14,6 +14,10 @@ const conflictReport = {
     { channel: 1, start_ms: 500, end_ms: 1000, conflict_count: 1 },
     { channel: 2, start_ms: 100, end_ms: 200, conflict_count: 1 },
   ],
+  isolation_plan: [
+    { index: 0, cue: "开场", channel: 1, start_ms: 0, end_ms: 1000 },
+    { index: 2, cue: "面光", channel: 2, start_ms: 0, end_ms: 300 },
+  ],
 };
 
 // 通道 1 上三条冲突链式合并为 [200, 1000)，另有一条独立冲突 [1100, 1200)；
@@ -34,6 +38,10 @@ const windowReport = {
     { channel: 1, start_ms: 1100, end_ms: 1200, conflict_count: 1 },
     { channel: 2, start_ms: 200, end_ms: 400, conflict_count: 1 },
   ],
+  isolation_plan: [
+    { index: 1, cue: "染色", channel: 1, start_ms: 200, end_ms: 600 },
+    { index: 4, cue: "面光", channel: 2, start_ms: 0, end_ms: 400 },
+  ],
 };
 
 const cleanReport = {
@@ -42,6 +50,7 @@ const cleanReport = {
   conflict_count: 0,
   conflicts: [],
   contention_windows: [],
+  isolation_plan: [],
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -85,7 +94,7 @@ describe("App", () => {
     expect(screen.getAllByTestId("conflict-row")).toHaveLength(2);
   });
 
-  it("无冲突时显示可放行与检查通道数，且不出现时间窗", async () => {
+  it("无冲突时显示可放行与检查通道数，且不出现时间窗与隔离建议", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, cleanReport)));
     render(<App />);
     uploadFile("[]");
@@ -96,6 +105,37 @@ describe("App", () => {
     expect(screen.queryByTestId("channel-filter")).not.toBeInTheDocument();
     expect(screen.queryByTestId("conflict-row")).not.toBeInTheDocument();
     expect(screen.queryByTestId("contention-window")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("isolation-group")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("isolation-item")).not.toBeInTheDocument();
+  });
+
+  it("按通道展示建议隔离项，通道筛选同步约束方案与冲突明细", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, conflictReport)));
+    render(<App />);
+    uploadFile("[]");
+
+    const groups = await screen.findAllByTestId("isolation-group");
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toHaveTextContent("通道 1");
+    expect(groups[0]).toHaveTextContent("开场");
+    expect(groups[0]).toHaveTextContent("[0, 1000)");
+    expect(groups[1]).toHaveTextContent("通道 2");
+    expect(groups[1]).toHaveTextContent("面光");
+    expect(screen.getAllByTestId("isolation-item")).toHaveLength(2);
+
+    // 通道筛选同步约束建议方案与冲突明细
+    fireEvent.change(screen.getByTestId("channel-filter"), { target: { value: "2" } });
+    const filteredGroups = screen.getAllByTestId("isolation-group");
+    expect(filteredGroups).toHaveLength(1);
+    expect(filteredGroups[0]).toHaveTextContent("通道 2");
+    expect(filteredGroups[0]).not.toHaveTextContent("开场");
+    expect(screen.getAllByTestId("isolation-item")).toHaveLength(1);
+    expect(screen.getAllByTestId("conflict-row")).toHaveLength(1);
+
+    // 回到全部通道：方案与明细一并恢复
+    fireEvent.change(screen.getByTestId("channel-filter"), { target: { value: "all" } });
+    expect(screen.getAllByTestId("isolation-item")).toHaveLength(2);
+    expect(screen.getAllByTestId("conflict-row")).toHaveLength(2);
   });
 
   it("展示抢值时间窗，点击下钻相交冲突，再次点击恢复全部明细", async () => {
@@ -169,7 +209,7 @@ describe("App", () => {
     expect(screen.queryByTestId("window-filter-note")).not.toBeInTheDocument();
   });
 
-  it("422 时清除旧报告与时间窗并标明数组下标", async () => {
+  it("422 时清除旧报告、时间窗与隔离建议并标明数组下标", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(200, conflictReport))
@@ -190,6 +230,7 @@ describe("App", () => {
     uploadFile("good");
     await screen.findAllByTestId("conflict-row");
     expect(screen.getAllByTestId("contention-window")).toHaveLength(2);
+    expect(screen.getAllByTestId("isolation-item")).toHaveLength(2);
 
     uploadFile("bad");
     const items = await screen.findAllByTestId("error-item");
@@ -197,10 +238,31 @@ describe("App", () => {
     expect(items[0]).toHaveTextContent("数组下标 1");
     expect(items[0]).toHaveTextContent("channel 必须在 1～512 之间");
     expect(items[1]).toHaveTextContent("数组下标 3");
-    // 旧报告与时间窗已被清除
+    // 旧报告、时间窗与隔离建议已被清除，只保留错误提示
     expect(screen.queryByTestId("conflict-row")).not.toBeInTheDocument();
     expect(screen.queryByTestId("contention-window")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("isolation-item")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("isolation-group")).not.toBeInTheDocument();
     expect(screen.queryByTestId("status-banner")).not.toBeInTheDocument();
+  });
+
+  it("请求中断时只保留错误提示，不残留报告与隔离建议", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, conflictReport))
+      .mockRejectedValueOnce(new TypeError("fetch failed"));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    uploadFile("good");
+    await screen.findAllByTestId("isolation-item");
+
+    uploadFile("interrupted");
+    await screen.findByTestId("error-panel");
+    expect(screen.getByTestId("error-panel")).toHaveTextContent("无法连接");
+    expect(screen.queryByTestId("report-panel")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("isolation-item")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("conflict-row")).not.toBeInTheDocument();
   });
 
   it("整份 JSON 非法时错误不携带下标", async () => {
@@ -245,6 +307,8 @@ describe("App", () => {
     const windows = await screen.findAllByTestId("contention-window");
     expect(windows).toHaveLength(3);
     expect(screen.queryByTestId("error-panel")).not.toBeInTheDocument();
+    // 隔离建议随报告一并恢复
+    expect(screen.getAllByTestId("isolation-item")).toHaveLength(2);
 
     // 恢复后时间窗可正常下钻
     fireEvent.click(windows[0]);

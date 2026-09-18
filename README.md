@@ -75,6 +75,9 @@ docker compose up --build --exit-code-from verify verify
   ],
   "contention_windows": [
     {"channel": 1, "start_ms": 500, "end_ms": 1000, "conflict_count": 1}
+  ],
+  "isolation_plan": [
+    {"index": 0, "cue": "开场", "channel": 1, "start_ms": 0, "end_ms": 1000}
   ]
 }
 ```
@@ -82,6 +85,12 @@ docker compose up --build --exit-code-from verify verify
 `contention_windows` 为抢值时间窗：同一通道内相交或首尾相接（含端点相接）的冲突
 重叠区间确定性合并而来，每项含通道、起止毫秒与覆盖的冲突数量，
 按通道 → 起点排序；无冲突时为空数组。
+
+`isolation_plan` 为建议临时隔离方案：以每个通道的原始 cue 为候选全局求解，
+使余下指令互不重叠且隔离数量最少；数量相同时依次取隔离总时长更短、
+源数组下标升序序列字典序更小者。每项含源数组下标 `index`、名称 `cue`、
+通道 `channel` 与原始区间 `[start_ms, end_ms)`，按通道 → 下标排序；
+无冲突时为空数组。
 
 - `422`（`index` 为数组下标；整份 JSON 非法时为 `null`）
 

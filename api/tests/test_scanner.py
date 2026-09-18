@@ -3,7 +3,13 @@
 import itertools
 import random
 
-from app.scanner import Conflict, Cue, merge_contention_windows, scan_conflicts
+from app.scanner import (
+    Conflict,
+    Cue,
+    merge_contention_windows,
+    plan_isolation,
+    scan_conflicts,
+)
 
 
 def cue(name: str, channel: int, start: int, end: int) -> Cue:
@@ -320,3 +326,143 @@ class TestContentionWindows:
             ]
         )
         assert self.window_keys(report) == [(1, 50, 100, 1), (2, 50, 100, 1)]
+
+
+def brute_force_isolation(cues: list[Cue]) -> list[int]:
+    """独立暴力枚举：数量最少 → 隔离总时长更短 → 下标升序序列字典序更小。"""
+    best: tuple | None = None
+    for mask in range(1 << len(cues)):
+        removed = [i for i in range(len(cues)) if mask >> i & 1]
+        kept = [i for i in range(len(cues)) if not mask >> i & 1]
+        if any(
+            cues[a].channel == cues[b].channel
+            and max(cues[a].start_ms, cues[b].start_ms)
+            < min(cues[a].end_ms, cues[b].end_ms)
+            for a, b in itertools.combinations(kept, 2)
+        ):
+            continue
+        key = (
+            len(removed),
+            sum(cues[i].end_ms - cues[i].start_ms for i in removed),
+            removed,
+        )
+        if best is None or key < best:
+            best = key
+    return best[2]
+
+
+class TestIsolationPlan:
+    def plan_keys(self, cues: list[Cue]) -> list[tuple]:
+        return [
+            (item.channel, item.index, item.cue, item.start_ms, item.end_ms)
+            for item in plan_isolation(cues)
+        ]
+
+    def test_empty_when_no_conflicts(self):
+        assert plan_isolation([cue("A", 1, 0, 100), cue("B", 1, 100, 200)]) == []
+        assert plan_isolation([]) == []
+
+    def test_touching_endpoints_coexist_without_isolation(self):
+        # 端点相接不算重叠，两条都可保留，无需隔离
+        cues = [cue("A", 1, 0, 100), cue("B", 1, 100, 200), cue("C", 1, 200, 250)]
+        assert plan_isolation(cues) == []
+
+    def test_chain_isolates_single_middle_cue(self):
+        # 链式重叠 A∩B、B∩C（A∩C 为空）：逐冲突任选端点的贪心会隔离两条，
+        # 全局最优只隔离中间的 B
+        cues = [cue("A", 1, 0, 10), cue("B", 1, 5, 15), cue("C", 1, 10, 20)]
+        assert self.plan_keys(cues) == [(1, 1, "B", 5, 15)]
+
+    def test_long_chain_keeps_alternating_cues(self):
+        # 5 条依次相叠的链：隔离第 2、4 条即可全部走台
+        cues = [cue(f"C{i}", 1, i * 10, i * 10 + 15) for i in range(5)]
+        assert [item.index for item in plan_isolation(cues)] == [1, 3]
+
+    def test_shorter_total_isolation_duration_wins(self):
+        # 两条相叠：各隔离一条数量相同，隔离时长更短的 B（10ms）而非 A（100ms）
+        cues = [cue("A", 1, 0, 100), cue("B", 1, 50, 60)]
+        assert self.plan_keys(cues) == [(1, 1, "B", 50, 60)]
+
+    def test_identical_duplicates_decided_by_source_index(self):
+        # 名称与区间完全相同的重复项：数量、时长都并列，隔离源下标更小者
+        cues = [cue("X", 1, 0, 100), cue("X", 1, 0, 100)]
+        assert self.plan_keys(cues) == [(1, 0, "X", 0, 100)]
+
+    def test_index_sequence_breaks_remaining_ties(self):
+        # 数量与隔离总时长均并列时，被隔离下标升序序列字典序更小者优
+        cues = [
+            cue("A", 1, 0, 10),   # 下标 0
+            cue("B", 1, 5, 15),   # 下标 1
+            cue("C", 1, 10, 20),  # 下标 2
+            cue("D", 1, 15, 25),  # 下标 3
+        ]
+        # 四条链最少隔离两条，可选 {0,2} / {1,2} / {1,3}，时长都是 20ms，
+        # 下标升序序列 [0, 2] 字典序最小
+        assert [item.index for item in plan_isolation(cues)] == [0, 2]
+
+    def test_plan_sorted_by_channel_then_index(self):
+        cues = [
+            cue("P", 2, 0, 10),   # 下标 0，通道 2，与 Q 相叠
+            cue("Q", 2, 5, 15),   # 下标 1，通道 2
+            cue("R", 1, 0, 10),   # 下标 2，通道 1，与 S 相叠
+            cue("S", 1, 5, 15),   # 下标 3，通道 1
+        ]
+        # 通道 1 隔离 R（下标 2），通道 2 隔离 P（下标 0）；输出按通道 → 下标
+        assert self.plan_keys(cues) == [
+            (1, 2, "R", 0, 10),
+            (2, 0, "P", 0, 10),
+        ]
+
+    def test_channels_optimized_independently(self):
+        # 通道 1 的链式重叠与通道 2 的单点重叠互不影响
+        cues = [
+            cue("A", 1, 0, 10),
+            cue("B", 1, 5, 15),
+            cue("C", 1, 10, 20),
+            cue("X", 2, 0, 100),
+            cue("Y", 2, 50, 60),
+        ]
+        assert self.plan_keys(cues) == [(1, 1, "B", 5, 15), (2, 4, "Y", 50, 60)]
+
+    def test_scan_report_integrates_isolation_plan(self):
+        report = scan_conflicts(
+            [cue("A", 1, 0, 10), cue("B", 1, 5, 15), cue("C", 1, 10, 20)]
+        )
+        assert len(report.conflicts) == 2
+        assert [(i.index, i.cue) for i in report.isolation_plan] == [(1, "B")]
+
+    def test_remaining_cues_never_overlap(self):
+        # 性质：按方案隔离后，余下 cue 在各自通道内互不重叠
+        rng = random.Random(20260918)
+        for _ in range(200):
+            cues = []
+            for _ in range(rng.randint(0, 10)):
+                start = rng.randint(0, 40)
+                cues.append(
+                    cue(
+                        chr(ord("A") + rng.randint(0, 3)),
+                        rng.randint(1, 3),
+                        start,
+                        start + rng.randint(1, 15),
+                    )
+                )
+            removed = {item.index for item in plan_isolation(cues)}
+            kept = [c for i, c in enumerate(cues) if i not in removed]
+            assert scan_conflicts(kept).conflicts == []
+
+    def test_matches_brute_force_under_scrambled_inputs(self):
+        rng = random.Random(20260918)
+        for _ in range(300):
+            cues = []
+            for _ in range(rng.randint(0, 9)):
+                start = rng.randint(0, 30)
+                cues.append(
+                    cue(
+                        chr(ord("A") + rng.randint(0, 3)),
+                        rng.randint(1, 3),
+                        start,
+                        start + rng.randint(1, 12),
+                    )
+                )
+            got = sorted(item.index for item in plan_isolation(cues))
+            assert got == brute_force_isolation(cues)

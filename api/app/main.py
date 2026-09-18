@@ -93,5 +93,15 @@ async def analyze(request: Request) -> JSONResponse:
                 }
                 for w in report.contention_windows
             ],
+            "isolation_plan": [
+                {
+                    "index": item.index,
+                    "cue": item.cue,
+                    "channel": item.channel,
+                    "start_ms": item.start_ms,
+                    "end_ms": item.end_ms,
+                }
+                for item in report.isolation_plan
+            ],
         },
     )

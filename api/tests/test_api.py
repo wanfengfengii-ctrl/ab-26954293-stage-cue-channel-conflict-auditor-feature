@@ -43,6 +43,10 @@ class TestAnalyzeSuccess:
         assert body["contention_windows"] == [
             {"channel": 1, "start_ms": 500, "end_ms": 1000, "conflict_count": 1}
         ]
+        # 两条时长相同，隔离源下标更小者
+        assert body["isolation_plan"] == [
+            {"index": 0, "cue": "开场", "channel": 1, "start_ms": 0, "end_ms": 1000}
+        ]
 
     def test_no_conflict_report(self):
         payload = [
@@ -128,6 +132,72 @@ class TestContentionWindows:
         assert set(body.keys()) == {"detail"}
         assert set(body["detail"].keys()) == {"message", "errors"}
         assert body["detail"]["errors"][0]["index"] == 0
+
+
+class TestIsolationPlan:
+    def test_chain_isolates_single_middle_cue(self):
+        # 链式重叠：逐冲突任选端点的贪心会隔离两条，全局最优只隔离中间一条
+        payload = [
+            {"cue": "A", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"cue": "B", "channel": 1, "start_ms": 5, "end_ms": 15},
+            {"cue": "C", "channel": 1, "start_ms": 10, "end_ms": 20},
+        ]
+        response = post_raw(json.dumps(payload))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["conflict_count"] == 2
+        assert body["isolation_plan"] == [
+            {"index": 1, "cue": "B", "channel": 1, "start_ms": 5, "end_ms": 15}
+        ]
+
+    def test_touching_endpoints_coexist_without_isolation(self):
+        payload = [
+            {"cue": "A", "channel": 1, "start_ms": 0, "end_ms": 100},
+            {"cue": "B", "channel": 1, "start_ms": 100, "end_ms": 200},
+        ]
+        body = post_raw(json.dumps(payload)).json()
+        assert body["conflicts"] == []
+        assert body["isolation_plan"] == []
+
+    def test_identical_duplicates_isolated_by_source_index(self):
+        # 名称与区间完全相同的重复项：隔离源下标更小者
+        payload = [
+            {"cue": "X", "channel": 1, "start_ms": 0, "end_ms": 100},
+            {"cue": "X", "channel": 1, "start_ms": 0, "end_ms": 100},
+        ]
+        body = post_raw(json.dumps(payload)).json()
+        assert body["isolation_plan"] == [
+            {"index": 0, "cue": "X", "channel": 1, "start_ms": 0, "end_ms": 100}
+        ]
+
+    def test_shorter_isolation_duration_wins(self):
+        payload = [
+            {"cue": "长渐变", "channel": 1, "start_ms": 0, "end_ms": 100},
+            {"cue": "短渐变", "channel": 1, "start_ms": 50, "end_ms": 60},
+        ]
+        body = post_raw(json.dumps(payload)).json()
+        assert body["isolation_plan"] == [
+            {"index": 1, "cue": "短渐变", "channel": 1, "start_ms": 50, "end_ms": 60}
+        ]
+
+    def test_plan_sorted_by_channel_then_index(self):
+        payload = [
+            {"cue": "P", "channel": 2, "start_ms": 0, "end_ms": 10},
+            {"cue": "Q", "channel": 2, "start_ms": 5, "end_ms": 15},
+            {"cue": "R", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"cue": "S", "channel": 1, "start_ms": 5, "end_ms": 15},
+        ]
+        body = post_raw(json.dumps(payload)).json()
+        assert body["isolation_plan"] == [
+            {"index": 2, "cue": "R", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"index": 0, "cue": "P", "channel": 2, "start_ms": 0, "end_ms": 10},
+        ]
+
+    def test_422_response_has_no_isolation_plan(self):
+        payload = [{"cue": "A", "channel": 999, "start_ms": 0, "end_ms": 100}]
+        response = post_raw(json.dumps(payload))
+        assert response.status_code == 422
+        assert "isolation_plan" not in response.json()
 
 
 class TestAnalyzeRejection:

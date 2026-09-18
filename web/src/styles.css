@@ -138,6 +138,50 @@ input[type="file"] {
   margin: 8px 0 0;
 }
 
+.isolation-panel {
+  margin-bottom: 14px;
+}
+
+.isolation-title {
+  color: #9aa3b5;
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+
+.isolation-group {
+  margin-bottom: 10px;
+}
+
+.isolation-channel {
+  color: #ffbf70;
+  font-weight: 600;
+  font-size: 14px;
+  margin: 0 0 6px;
+}
+
+.isolation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.isolation-list li {
+  background: #14161c;
+  border: 1px solid #3a4157;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 14px;
+}
+
+.isolation-index {
+  color: #9aa3b5;
+  font-size: 13px;
+  margin-right: 8px;
+}
+
 select {
   background: #14161c;
   color: #e8eaf0;

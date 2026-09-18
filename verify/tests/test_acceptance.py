@@ -207,6 +207,72 @@ class TestContentionWindows:
         assert "conflicts" not in body
 
 
+class TestIsolationPlan:
+    def test_chain_isolates_single_middle_cue(self, web_url):
+        # 链式重叠 A∩B、B∩C：逐冲突任选端点的贪心会隔离两条，全局最优只隔离 B
+        payload = [
+            {"cue": "A", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"cue": "B", "channel": 1, "start_ms": 5, "end_ms": 15},
+            {"cue": "C", "channel": 1, "start_ms": 10, "end_ms": 20},
+        ]
+        resp = analyze(web_url, payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["conflict_count"] == 2
+        assert body["isolation_plan"] == [
+            {"index": 1, "cue": "B", "channel": 1, "start_ms": 5, "end_ms": 15}
+        ]
+
+    def test_touching_endpoints_coexist_without_isolation(self, web_url):
+        payload = [
+            {"cue": "A", "channel": 1, "start_ms": 0, "end_ms": 100},
+            {"cue": "B", "channel": 1, "start_ms": 100, "end_ms": 200},
+        ]
+        body = analyze(web_url, payload).json()
+        assert body["conflicts"] == []
+        assert body["isolation_plan"] == []
+
+    def test_identical_duplicates_isolated_by_source_index(self, web_url):
+        # 名称与区间完全相同的重复项：数量、时长并列，按源下标稳定决胜
+        payload = [
+            {"cue": "X", "channel": 4, "start_ms": 0, "end_ms": 100},
+            {"cue": "X", "channel": 4, "start_ms": 0, "end_ms": 100},
+        ]
+        body = analyze(web_url, payload).json()
+        assert body["isolation_plan"] == [
+            {"index": 0, "cue": "X", "channel": 4, "start_ms": 0, "end_ms": 100}
+        ]
+
+    def test_shorter_isolation_duration_wins(self, web_url):
+        payload = [
+            {"cue": "长渐变", "channel": 7, "start_ms": 0, "end_ms": 5000},
+            {"cue": "短渐变", "channel": 7, "start_ms": 1200, "end_ms": 1800},
+        ]
+        body = analyze(web_url, payload).json()
+        assert body["isolation_plan"] == [
+            {"index": 1, "cue": "短渐变", "channel": 7, "start_ms": 1200, "end_ms": 1800}
+        ]
+
+    def test_plan_sorted_by_channel_then_index(self, web_url):
+        payload = [
+            {"cue": "P", "channel": 2, "start_ms": 0, "end_ms": 10},
+            {"cue": "Q", "channel": 2, "start_ms": 5, "end_ms": 15},
+            {"cue": "R", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"cue": "S", "channel": 1, "start_ms": 5, "end_ms": 15},
+        ]
+        body = analyze(web_url, payload).json()
+        assert body["isolation_plan"] == [
+            {"index": 2, "cue": "R", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"index": 0, "cue": "P", "channel": 2, "start_ms": 0, "end_ms": 10},
+        ]
+
+    def test_422_response_has_no_isolation_plan(self, web_url):
+        payload = [{"cue": "A", "channel": 0, "start_ms": 0, "end_ms": 10}]
+        resp = analyze(web_url, payload)
+        assert resp.status_code == 422
+        assert "isolation_plan" not in resp.json()
+
+
 class TestValidation:
     def test_malformed_json_is_422(self, web_url):
         resp = analyze(web_url, b'[{"cue": "broken", ]')

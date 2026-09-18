@@ -160,3 +160,59 @@ test("校验失败不保留报告与时间窗，重传合法文件后可正常�
   await page.getByTestId("contention-window").first().click();
   await expect(page.getByTestId("conflict-row")).toHaveCount(3);
 });
+
+test("建议隔离项：按通道分组展示，通道筛选同步约束方案与冲突明细", async ({ page }) => {
+  await page.setInputFiles('[data-testid="file-input"]', fixture("isolation.json"));
+
+  await expect(page.getByTestId("status-banner")).toContainText("3 处通道冲突");
+  // 链式重叠只隔离中间的染色；通道 2 的重复面光隔离源下标更小的一条
+  const groups = page.getByTestId("isolation-group");
+  await expect(groups).toHaveCount(2);
+  await expect(groups.nth(0)).toContainText("通道 1");
+  await expect(groups.nth(0)).toContainText("染色");
+  await expect(groups.nth(0)).toContainText("[500, 1500)");
+  await expect(groups.nth(1)).toContainText("通道 2");
+  await expect(groups.nth(1)).toContainText("面光");
+  await expect(groups.nth(1)).toContainText("[0, 400)");
+  await expect(page.getByTestId("isolation-item")).toHaveCount(2);
+  await expect(page.getByTestId("conflict-row")).toHaveCount(3);
+
+  // 通道筛选同步约束建议方案与冲突明细
+  await page.getByTestId("channel-filter").selectOption("2");
+  await expect(page.getByTestId("isolation-group")).toHaveCount(1);
+  await expect(page.getByTestId("isolation-group").first()).toContainText("通道 2");
+  await expect(page.getByTestId("isolation-group").first()).not.toContainText("染色");
+  await expect(page.getByTestId("isolation-item")).toHaveCount(1);
+  await expect(page.getByTestId("conflict-row")).toHaveCount(1);
+
+  // 回到全部通道：方案与明细一并恢复
+  await page.getByTestId("channel-filter").selectOption("all");
+  await expect(page.getByTestId("isolation-item")).toHaveCount(2);
+  await expect(page.getByTestId("conflict-row")).toHaveCount(3);
+});
+
+test("无冲突文件不显示建议隔离项", async ({ page }) => {
+  await page.setInputFiles('[data-testid="file-input"]', fixture("clean.json"));
+
+  await expect(page.getByTestId("status-banner")).toContainText("可放行");
+  await expect(page.getByTestId("isolation-item")).toHaveCount(0);
+  await expect(page.getByTestId("isolation-group")).toHaveCount(0);
+});
+
+test("校验失败后只保留错误提示，重传合法文件恢复报告与隔离建议", async ({ page }) => {
+  await page.setInputFiles('[data-testid="file-input"]', fixture("isolation.json"));
+  await expect(page.getByTestId("isolation-item")).toHaveCount(2);
+
+  // 校验失败：只展示错误，不保留隔离建议
+  await page.setInputFiles('[data-testid="file-input"]', fixture("invalid.json"));
+  await expect(page.getByTestId("error-panel")).toBeVisible();
+  await expect(page.getByTestId("isolation-item")).toHaveCount(0);
+  await expect(page.getByTestId("isolation-group")).toHaveCount(0);
+  await expect(page.getByTestId("report-panel")).toHaveCount(0);
+
+  // 重传合法文件：报告与隔离建议恢复
+  await page.setInputFiles('[data-testid="file-input"]', fixture("isolation.json"));
+  await expect(page.getByTestId("isolation-item")).toHaveCount(2);
+  await expect(page.getByTestId("error-panel")).toHaveCount(0);
+  await expect(page.getByTestId("status-banner")).toContainText("3 处通道冲突");
+});

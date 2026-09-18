@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 
 
@@ -38,10 +39,22 @@ class ContentionWindow:
 
 
 @dataclass(frozen=True)
+class IsolationItem:
+    """一条建议临时隔离的 cue：携带源数组下标、名称、通道与原始区间。"""
+
+    index: int
+    cue: str
+    channel: int
+    start_ms: int
+    end_ms: int
+
+
+@dataclass(frozen=True)
 class ScanReport:
     channels_checked: int
     conflicts: list[Conflict] = field(default_factory=list)
     contention_windows: list[ContentionWindow] = field(default_factory=list)
+    isolation_plan: list[IsolationItem] = field(default_factory=list)
 
 
 def _time_order(cue: Cue) -> tuple[int, int, str]:
@@ -99,6 +112,7 @@ def scan_conflicts(cues: list[Cue]) -> ScanReport:
         channels_checked=len(by_channel),
         conflicts=conflicts,
         contention_windows=merge_contention_windows(conflicts),
+        isolation_plan=plan_isolation(cues),
     )
 
 
@@ -133,3 +147,74 @@ def merge_contention_windows(conflicts: list[Conflict]) -> list[ContentionWindow
 
     windows.sort(key=lambda w: (w.channel, w.start_ms, w.end_ms))
     return windows
+
+
+def plan_isolation(cues: list[Cue]) -> list[IsolationItem]:
+    """求隔离数量最少的临时隔离方案，使余下 cue 在各自通道内互不重叠。
+
+    以每个通道的原始 cue 为候选全局求解（等价于加权区间调度）：
+    - 隔离数最少 ⟺ 保留数最多；
+    - 隔离总时长更短 ⟺ 保留总时长更长（候选总时长恒定）；
+    - 仍并列时，被隔离下标的升序序列字典序更小者优，即优先隔离源数组下标小的 cue。
+
+    逐冲突任选一端隔离的贪心在链式重叠（A∩B、B∩C 而 A∩C 为空）上会多隔离一条，
+    因此这里按通道做动态规划取全局最优，再按通道 → 源下标排序输出。
+    """
+    by_channel: dict[int, list[tuple[int, Cue]]] = {}
+    for index, cue in enumerate(cues):
+        by_channel.setdefault(cue.channel, []).append((index, cue))
+
+    plan: list[IsolationItem] = []
+    for channel, items in by_channel.items():
+        for index in _channel_isolation_indices(items):
+            cue = cues[index]
+            plan.append(
+                IsolationItem(
+                    index=index,
+                    cue=cue.cue,
+                    channel=channel,
+                    start_ms=cue.start_ms,
+                    end_ms=cue.end_ms,
+                )
+            )
+    plan.sort(key=lambda item: (item.channel, item.index))
+    return plan
+
+
+def _channel_isolation_indices(items: list[tuple[int, Cue]]) -> list[int]:
+    """单通道内的最优隔离下标（升序）。items 为 (源数组下标, cue) 对。"""
+    m = len(items)
+    if m < 2:
+        return []
+
+    # 第三优先级用位权编码：源下标越小位权越大，等数量前提下
+    # "被隔离下标升序序列字典序更小" 等价于被隔离集合的位权总和更大。
+    bit_of = {
+        index: 1 << (m - 1 - pos)
+        for pos, (index, _) in enumerate(sorted(items, key=lambda pair: pair[0]))
+    }
+
+    # 按终点升序做加权区间调度；终点相同再按起点、源下标，保证扫描顺序确定。
+    seq = sorted(items, key=lambda pair: (pair[1].end_ms, pair[1].start_ms, pair[0]))
+    ends = [cue.end_ms for _, cue in seq]
+
+    # dp 状态：只考虑 seq 前 i 个时的最优 (保留数, 保留总时长, 被隔离位权和)。
+    count = [0] * (m + 1)
+    kept_ms = [0] * (m + 1)
+    dropped_bits = [0] * (m + 1)
+    for i in range(1, m + 1):
+        index, cue = seq[i - 1]
+        duration = cue.end_ms - cue.start_ms
+        # 半开区间：终点 <= 当前起点即兼容（端点相接可共存）。
+        compatible = bisect_right(ends, cue.start_ms, 0, i - 1)
+        # 方案一：隔离当前 cue。
+        skip = (count[i - 1], kept_ms[i - 1], dropped_bits[i - 1] | bit_of[index])
+        # 方案二：保留当前 cue，排在其后且与之相叠的中间项全部隔离。
+        keep_bits = dropped_bits[compatible]
+        for k in range(compatible, i - 1):
+            keep_bits |= bit_of[seq[k][0]]
+        keep = (count[compatible] + 1, kept_ms[compatible] + duration, keep_bits)
+        count[i], kept_ms[i], dropped_bits[i] = max(skip, keep)
+
+    final_bits = dropped_bits[m]
+    return sorted(index for index, bit in bit_of.items() if final_bits & bit)
