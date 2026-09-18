@@ -97,6 +97,72 @@ input[type="file"] {
   margin-bottom: 14px;
 }
 
+.isolation-panel {
+  background: #241a12;
+  border: 1px solid #5c3c17;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.isolation-title {
+  color: #ffbf70;
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 10px;
+}
+
+.isolation-channel {
+  margin-bottom: 8px;
+}
+
+.isolation-channel:last-child {
+  margin-bottom: 0;
+}
+
+.isolation-channel-title {
+  color: #9aa3b5;
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.isolation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.isolation-list li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 14px;
+  background: #1d212b;
+  border: 1px solid #3a2f1c;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.isolation-index {
+  color: #ffbf70;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.isolation-name {
+  color: #e8eaf0;
+}
+
+.isolation-range {
+  color: #9aa3b5;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 .window-title {
   color: #9aa3b5;
   font-size: 14px;

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 
 
@@ -38,10 +39,22 @@ class ContentionWindow:
 
 
 @dataclass(frozen=True)
+class IsolationItem:
+    """建议临时隔离的单条原始 cue；source_index 为其在源数组中的下标。"""
+
+    source_index: int
+    cue: str
+    channel: int
+    start_ms: int
+    end_ms: int
+
+
+@dataclass(frozen=True)
 class ScanReport:
     channels_checked: int
     conflicts: list[Conflict] = field(default_factory=list)
     contention_windows: list[ContentionWindow] = field(default_factory=list)
+    isolation_plan: list[IsolationItem] = field(default_factory=list)
 
 
 def _time_order(cue: Cue) -> tuple[int, int, str]:
@@ -56,9 +69,12 @@ def _name_order(cue: Cue) -> tuple[str, int, int]:
 
 def scan_conflicts(cues: list[Cue]) -> ScanReport:
     """按通道找出全部两两重叠，返回确定排序的冲突列表。"""
-    by_channel: dict[int, list[Cue]] = {}
-    for cue in cues:
-        by_channel.setdefault(cue.channel, []).append(cue)
+    # 连同源数组下标一起分组：隔离方案必须回填每个 cue 的原始下标，
+    # 且同名称同区间的重复项要靠源下标稳定决胜。
+    indexed = list(enumerate(cues))
+    by_channel: dict[int, list[tuple[int, Cue]]] = {}
+    for source_index, cue in indexed:
+        by_channel.setdefault(cue.channel, []).append((source_index, cue))
 
     conflicts: list[Conflict] = []
     for channel, items in by_channel.items():
@@ -66,9 +82,9 @@ def scan_conflicts(cues: list[Cue]) -> ScanReport:
         # 起点只会更晚，不可能再与 a 重叠，才能安全提前终止。
         # （若按名称排序，名称居中但时间很靠后的 cue 会触发提前终止，
         # 把名称靠后但实际重叠的 cue 跳过，导致漏判。）
-        items.sort(key=_time_order)
-        for i, a in enumerate(items):
-            for b in items[i + 1 :]:
+        items.sort(key=lambda pair: _time_order(pair[1]))
+        for i, (_, a) in enumerate(items):
+            for _, b in items[i + 1 :]:
                 if b.start_ms >= a.end_ms:
                     break
                 overlap_start = max(a.start_ms, b.start_ms)
@@ -99,6 +115,7 @@ def scan_conflicts(cues: list[Cue]) -> ScanReport:
         channels_checked=len(by_channel),
         conflicts=conflicts,
         contention_windows=merge_contention_windows(conflicts),
+        isolation_plan=plan_isolation(by_channel),
     )
 
 
@@ -133,3 +150,104 @@ def merge_contention_windows(conflicts: list[Conflict]) -> list[ContentionWindow
 
     windows.sort(key=lambda w: (w.channel, w.start_ms, w.end_ms))
     return windows
+
+
+def plan_isolation(
+    by_channel: dict[int, list[tuple[int, Cue]]],
+) -> list[IsolationItem]:
+    """求每通道最少临时隔离方案：移除最少 cue 使保留区间互不重叠。
+
+    这是「最多互不重叠区间」问题的全局最优解（加权区间调度 DP），
+    不能用「遇到冲突任选一端移除」的贪心代替——链式重叠
+    （A∩B、B∩C，但 A 与 C 不相交）下贪心会隔离两个端点，
+    而全局只需隔离中间一个。
+
+    目标依次比较：
+    1. 隔离数量最少（等价于保留数量最多）；
+    2. 隔离总时长（end_ms - start_ms 之和）更短；
+    3. 隔离项源数组下标升序序列的字典序更小。
+
+    半开区间端点相接（前一个 end_ms 等于后一个 start_ms）可以共存，
+    故前驱按 end_ms <= start_ms 选取。名称与区间完全相同的重复项
+    依靠源下标稳定决胜，结果确定且可复现。
+    """
+    plan: list[IsolationItem] = []
+    for channel, pairs in by_channel.items():
+        entries = [(idx, cue.start_ms, cue.end_ms) for idx, cue in pairs]
+        entries.sort(key=lambda e: (e[2], e[1], e[0]))
+        n = len(entries)
+        starts = [e[1] for e in entries]
+        ends = [e[2] for e in entries]
+
+        # p[i]：满足 end_ms <= start_i 的最后一个下标（含端点相接），无则 -1
+        prev: list[int] = [-1] * n
+        for i in range(n):
+            prev[i] = bisect_right(ends, starts[i], hi=i) - 1
+
+        # states[i]：只考虑前 i+1 个区间时，保留集合的最优
+        # (保留数量, 保留总时长, 保留下标集合的有序元组)
+        states: list[tuple[int, int, tuple[int, ...]]] = [None] * n  # type: ignore[list-item]
+        for i in range(n):
+            source_index, start, end = entries[i]
+            take_count = 1
+            take_duration = end - start
+            take_indices = (source_index,)
+            if prev[i] >= 0:
+                base_count, base_duration, base_indices = states[prev[i]]
+                take_count += base_count
+                take_duration += base_duration
+                take_indices = tuple(_merge_sorted(base_indices, (source_index,)))
+            take_state = (take_count, take_duration, take_indices)
+
+            skip_state = states[i - 1] if i > 0 else (0, 0, ())
+            # 保留数量最多；并列时保留总时长更长（即隔离总时长更短）；
+            # 再并列时保留下标升序序列字典序更大（等价于隔离序列字典序更小）。
+            states[i] = take_state if _take_is_better(take_state, skip_state) else skip_state
+
+        kept = set(states[n - 1][2])
+        for source_index, cue in pairs:
+            if source_index not in kept:
+                plan.append(
+                    IsolationItem(
+                        source_index=source_index,
+                        cue=cue.cue,
+                        channel=channel,
+                        start_ms=cue.start_ms,
+                        end_ms=cue.end_ms,
+                    )
+                )
+
+    plan.sort(key=lambda item: (item.channel, item.source_index))
+    return plan
+
+
+def _merge_sorted(a: tuple[int, ...], b: tuple[int, ...]) -> list[int]:
+    """合并两个已按下标升序排列的元组。
+
+    entries 按时间排序，源下标位置任意，DP 前驱链中的下标不一定
+    小于当前下标，因此必须真正归并而不能直接拼接。
+    """
+    merged: list[int] = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        if a[i] <= b[j]:
+            merged.append(a[i])
+            i += 1
+        else:
+            merged.append(b[j])
+            j += 1
+    merged.extend(a[i:])
+    merged.extend(b[j:])
+    return merged
+
+
+def _take_is_better(
+    take: tuple[int, int, tuple[int, ...]],
+    skip: tuple[int, int, tuple[int, ...]],
+) -> bool:
+    """保留方案比较：数量 → 总时长 → 下标序列字典序（越大越优）。"""
+    if take[0] != skip[0]:
+        return take[0] > skip[0]
+    if take[1] != skip[1]:
+        return take[1] > skip[1]
+    return take[2] > skip[2]

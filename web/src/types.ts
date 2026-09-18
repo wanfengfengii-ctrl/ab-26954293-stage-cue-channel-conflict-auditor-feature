@@ -13,12 +13,22 @@ export interface ContentionWindow {
   conflict_count: number;
 }
 
+export interface IsolationItem {
+  /** 源数组下标 */
+  source_index: number;
+  cue: string;
+  channel: number;
+  start_ms: number;
+  end_ms: number;
+}
+
 export interface AnalysisReport {
   status: "ok";
   channels_checked: number;
   conflict_count: number;
   conflicts: Conflict[];
   contention_windows: ContentionWindow[];
+  isolation_plan: IsolationItem[];
 }
 
 export interface AnalysisErrorItem {

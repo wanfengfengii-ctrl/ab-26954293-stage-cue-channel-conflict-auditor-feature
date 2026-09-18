@@ -43,6 +43,15 @@ class TestAnalyzeSuccess:
         assert body["contention_windows"] == [
             {"channel": 1, "start_ms": 500, "end_ms": 1000, "conflict_count": 1}
         ]
+        assert body["isolation_plan"] == [
+            {
+                "source_index": 0,
+                "cue": "开场",
+                "channel": 1,
+                "start_ms": 0,
+                "end_ms": 1000,
+            }
+        ]
 
     def test_no_conflict_report(self):
         payload = [
@@ -56,6 +65,7 @@ class TestAnalyzeSuccess:
         assert body["conflict_count"] == 0
         assert body["channels_checked"] == 1
         assert body["contention_windows"] == []
+        assert body["isolation_plan"] == []
 
     def test_empty_array_is_ok(self):
         response = post_raw("[]")
@@ -64,6 +74,7 @@ class TestAnalyzeSuccess:
         assert body["channels_checked"] == 0
         assert body["conflicts"] == []
         assert body["contention_windows"] == []
+        assert body["isolation_plan"] == []
 
     def test_utf8_chinese_cue_names(self):
         response = post_raw(json.dumps(VALID_PAYLOAD, ensure_ascii=False).encode("utf-8"))
@@ -128,6 +139,73 @@ class TestContentionWindows:
         assert set(body.keys()) == {"detail"}
         assert set(body["detail"].keys()) == {"message", "errors"}
         assert body["detail"]["errors"][0]["index"] == 0
+
+
+class TestIsolationPlan:
+    def test_chain_conflict_global_minimum_isolates_middle_only(self):
+        # 链式重叠：A∩B、B∩C，A 与 C 端点相接可共存 → 只隔离中间 B（下标 1）
+        payload = [
+            {"cue": "A", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"cue": "B", "channel": 1, "start_ms": 5, "end_ms": 15},
+            {"cue": "C", "channel": 1, "start_ms": 10, "end_ms": 20},
+        ]
+        body = post_raw(json.dumps(payload)).json()
+        assert body["isolation_plan"] == [
+            {"source_index": 1, "cue": "B", "channel": 1, "start_ms": 5, "end_ms": 15}
+        ]
+
+    def test_touching_endpoints_need_no_isolation(self):
+        payload = [
+            {"cue": "A", "channel": 1, "start_ms": 0, "end_ms": 100},
+            {"cue": "B", "channel": 1, "start_ms": 100, "end_ms": 200},
+        ]
+        body = post_raw(json.dumps(payload)).json()
+        assert body["conflict_count"] == 0
+        assert body["isolation_plan"] == []
+
+    def test_identical_duplicates_tie_broken_by_source_index(self):
+        payload = [
+            {"cue": "X", "channel": 1, "start_ms": 0, "end_ms": 100},
+            {"cue": "X", "channel": 1, "start_ms": 0, "end_ms": 100},
+        ]
+        body = post_raw(json.dumps(payload)).json()
+        assert [item["source_index"] for item in body["isolation_plan"]] == [0]
+
+    def test_plan_sorted_by_channel_then_source_index_and_channels_independent(self):
+        # 通道 2 的 cue 在源数组中更靠前，输出仍按通道再按下标
+        payload = [
+            {"cue": "A", "channel": 2, "start_ms": 0, "end_ms": 10},
+            {"cue": "B", "channel": 2, "start_ms": 5, "end_ms": 15},
+            {"cue": "C", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"cue": "D", "channel": 1, "start_ms": 5, "end_ms": 15},
+        ]
+        body = post_raw(json.dumps(payload)).json()
+        assert [
+            (item["channel"], item["source_index"], item["cue"])
+            for item in body["isolation_plan"]
+        ] == [(1, 2, "C"), (2, 0, "A")]
+
+    def test_isolation_items_carry_original_interval(self):
+        payload = [
+            {"cue": "开场", "channel": 1, "start_ms": 0, "end_ms": 1000},
+            {"cue": "追光", "channel": 1, "start_ms": 500, "end_ms": 1500},
+        ]
+        item = post_raw(json.dumps(payload)).json()["isolation_plan"][0]
+        assert set(item.keys()) == {
+            "source_index",
+            "cue",
+            "channel",
+            "start_ms",
+            "end_ms",
+        }
+        assert item["start_ms"] == 0
+        assert item["end_ms"] == 1000
+
+    def test_422_response_has_no_isolation_plan(self):
+        payload = [{"cue": "A", "channel": 0, "start_ms": 0, "end_ms": 10}]
+        response = post_raw(json.dumps(payload))
+        assert response.status_code == 422
+        assert "isolation_plan" not in response.json()
 
 
 class TestAnalyzeRejection:

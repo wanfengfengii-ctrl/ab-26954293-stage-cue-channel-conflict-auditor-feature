@@ -207,6 +207,92 @@ class TestContentionWindows:
         assert "conflicts" not in body
 
 
+class TestIsolationPlan:
+    def test_chain_greedy_trap_needs_only_one_isolation(self, web_url):
+        # 链式重叠 A∩B、B∩C，A 与 C 端点相接可共存：
+        # 逐冲突任选一端的贪心会隔离两个端点，全局解只隔离中间 B
+        payload = [
+            {"cue": "A", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"cue": "B", "channel": 1, "start_ms": 5, "end_ms": 15},
+            {"cue": "C", "channel": 1, "start_ms": 10, "end_ms": 20},
+        ]
+        body = analyze(web_url, payload).json()
+        assert body["conflict_count"] == 2
+        assert body["isolation_plan"] == [
+            {"source_index": 1, "cue": "B", "channel": 1, "start_ms": 5, "end_ms": 15}
+        ]
+
+    def test_longer_chain_beats_endpoint_greedy(self, web_url):
+        # 四段纯链（相邻重叠、隔一个不冲突）：全局隔离 2 条，
+        # 而固定移除冲突对较早一端的贪心会隔离 3 条
+        payload = [
+            {"cue": "A", "channel": 3, "start_ms": 0, "end_ms": 10},
+            {"cue": "B", "channel": 3, "start_ms": 5, "end_ms": 15},
+            {"cue": "C", "channel": 3, "start_ms": 12, "end_ms": 22},
+            {"cue": "D", "channel": 3, "start_ms": 20, "end_ms": 30},
+        ]
+        body = analyze(web_url, payload).json()
+        assert [item["source_index"] for item in body["isolation_plan"]] == [0, 2]
+
+    def test_touching_endpoints_coexist_without_isolation(self, web_url):
+        payload = [
+            {"cue": "A", "channel": 1, "start_ms": 0, "end_ms": 100},
+            {"cue": "B", "channel": 1, "start_ms": 100, "end_ms": 200},
+            {"cue": "C", "channel": 1, "start_ms": 200, "end_ms": 300},
+        ]
+        body = analyze(web_url, payload).json()
+        assert body["conflict_count"] == 0
+        assert body["isolation_plan"] == []
+
+    def test_identical_duplicates_tie_broken_by_source_index(self, web_url):
+        # 名称与区间完全相同的重复项：必须隔离其一，按源下标稳定决胜（隔 0 留 1）
+        payload = [
+            {"cue": "同名", "channel": 8, "start_ms": 100, "end_ms": 200},
+            {"cue": "同名", "channel": 8, "start_ms": 100, "end_ms": 200},
+            {"cue": "同名", "channel": 8, "start_ms": 100, "end_ms": 200},
+        ]
+        body = analyze(web_url, payload).json()
+        assert [item["source_index"] for item in body["isolation_plan"]] == [0, 1]
+        for item in body["isolation_plan"]:
+            assert item["cue"] == "同名"
+            assert (item["channel"], item["start_ms"], item["end_ms"]) == (8, 100, 200)
+
+    def test_duration_tiebreak_isolates_shorter_total(self, web_url):
+        # 两段互不相连的冲突对，隔离数恒为 2，由隔离总时长决胜：隔两条短的
+        payload = [
+            {"cue": "长甲", "channel": 1, "start_ms": 0, "end_ms": 100},
+            {"cue": "短甲", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"cue": "短乙", "channel": 1, "start_ms": 200, "end_ms": 210},
+            {"cue": "长乙", "channel": 1, "start_ms": 200, "end_ms": 300},
+        ]
+        body = analyze(web_url, payload).json()
+        assert [item["source_index"] for item in body["isolation_plan"]] == [1, 2]
+
+    def test_plan_sorted_by_channel_then_index_and_carries_original_interval(self, web_url):
+        # 源数组中通道 2 的 cue 在前，输出仍按通道再按下标；每项携带原始区间
+        payload = [
+            {"cue": "A2", "channel": 2, "start_ms": 0, "end_ms": 10},
+            {"cue": "B2", "channel": 2, "start_ms": 5, "end_ms": 15},
+            {"cue": "A1", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"cue": "B1", "channel": 1, "start_ms": 5, "end_ms": 15},
+        ]
+        body = analyze(web_url, payload).json()
+        assert body["isolation_plan"] == [
+            {"source_index": 2, "cue": "A1", "channel": 1, "start_ms": 0, "end_ms": 10},
+            {"source_index": 0, "cue": "A2", "channel": 2, "start_ms": 0, "end_ms": 10},
+        ]
+
+    def test_no_conflict_response_has_empty_plan(self, web_url):
+        body = analyze(web_url, []).json()
+        assert body["isolation_plan"] == []
+
+    def test_422_response_has_no_isolation_plan(self, web_url):
+        payload = [{"cue": "A", "channel": 0, "start_ms": 0, "end_ms": 10}]
+        resp = analyze(web_url, payload)
+        assert resp.status_code == 422
+        assert "isolation_plan" not in resp.json()
+
+
 class TestValidation:
     def test_malformed_json_is_422(self, web_url):
         resp = analyze(web_url, b'[{"cue": "broken", ]')

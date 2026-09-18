@@ -11,6 +11,9 @@ const okReport = {
   contention_windows: [
     { channel: 1, start_ms: 50, end_ms: 100, conflict_count: 1 },
   ],
+  isolation_plan: [
+    { source_index: 0, cue: "A", channel: 1, start_ms: 0, end_ms: 100 },
+  ],
 };
 
 function jsonResponse(status: number, body: unknown): Response {

@@ -1,5 +1,9 @@
 import { useMemo, useState } from "react";
-import type { AnalysisReport, ContentionWindow } from "../types";
+import type {
+  AnalysisReport,
+  ContentionWindow,
+  IsolationItem,
+} from "../types";
 
 function windowKey(window: ContentionWindow): string {
   return `${window.channel}:${window.start_ms}:${window.end_ms}`;
@@ -25,6 +29,24 @@ export function ConflictReport({ report }: { report: AnalysisReport }) {
     () => [...new Set(report.conflicts.map((c) => c.channel))].sort((a, b) => a - b),
     [report],
   );
+
+  // 建议隔离项后端已按通道 → 源下标排序；通道筛选同步约束该方案。
+  // 按通道分组，保持原有顺序，供报告逐通道展示。
+  const isolationByChannel = useMemo(() => {
+    const groups = new Map<number, IsolationItem[]>();
+    for (const item of report.isolation_plan) {
+      if (channelFilter !== "all" && item.channel !== channelFilter) {
+        continue;
+      }
+      const list = groups.get(item.channel);
+      if (list) {
+        list.push(item);
+      } else {
+        groups.set(item.channel, [item]);
+      }
+    }
+    return [...groups.entries()].sort((a, b) => a[0] - b[0]);
+  }, [report, channelFilter]);
 
   if (report.conflicts.length === 0) {
     return (
@@ -82,6 +104,33 @@ export function ConflictReport({ report }: { report: AnalysisReport }) {
           ))}
         </select>
       </div>
+
+      {isolationByChannel.length > 0 && (
+        <div className="isolation-panel" data-testid="isolation-panel">
+          <p className="isolation-title">
+            建议临时隔离（全局最少项数；隔离后保留指令可完整走台）：
+          </p>
+          {isolationByChannel.map(([channel, items]) => (
+            <div key={channel} className="isolation-channel" data-testid="isolation-channel">
+              <p className="isolation-channel-title">通道 {channel}</p>
+              <ul className="isolation-list">
+                {items.map((item) => (
+                  <li
+                    key={`${item.channel}-${item.source_index}`}
+                    data-testid="isolation-item"
+                  >
+                    <span className="isolation-index">下标 {item.source_index}</span>
+                    <span className="isolation-name">{item.cue}</span>
+                    <span className="isolation-range">
+                      [{item.start_ms}, {item.end_ms}) ms
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
 
       {visibleWindows.length > 0 && (
         <div className="window-panel">

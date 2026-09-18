@@ -160,3 +160,66 @@ test("校验失败不保留报告与时间窗，重传合法文件后可正常�
   await page.getByTestId("contention-window").first().click();
   await expect(page.getByTestId("conflict-row")).toHaveCount(3);
 });
+
+test("建议隔离：链式冲突全局只隔中间一项，贪心选端点会多隔离", async ({ page }) => {
+  // A∩B、B∩C，A 与 C 端点相接可共存：全局最优只隔离中间 B（下标 1）
+  await page.setInputFiles('[data-testid="file-input"]', fixture("isolation-chain.json"));
+
+  await expect(page.getByTestId("status-banner")).toContainText("2 处通道冲突");
+  const panel = page.getByTestId("isolation-panel");
+  await expect(panel).toBeVisible();
+  await expect(page.getByTestId("isolation-channel")).toHaveCount(1);
+  const items = page.getByTestId("isolation-item");
+  await expect(items).toHaveCount(1);
+  await expect(items.first()).toContainText("下标 1");
+  await expect(items.first()).toContainText("B-中");
+  await expect(items.first()).toContainText("[5, 15)");
+});
+
+test("建议隔离按通道分组展示，通道筛选同步约束隔离方案", async ({ page }) => {
+  await page.setInputFiles('[data-testid="file-input"]', fixture("conflict.json"));
+
+  // 两个冲突通道各有建议隔离项：通道 1 隔「开场」、通道 2 隔「顶光」
+  const groups = page.getByTestId("isolation-channel");
+  await expect(groups).toHaveCount(2);
+  await expect(groups.nth(0)).toContainText("通道 1");
+  await expect(groups.nth(1)).toContainText("通道 2");
+  let items = page.getByTestId("isolation-item");
+  await expect(items).toHaveCount(2);
+  await expect(items.nth(0)).toContainText("下标 0");
+  await expect(items.nth(0)).toContainText("开场");
+  await expect(items.nth(1)).toContainText("下标 4");
+  await expect(items.nth(1)).toContainText("顶光");
+  await expect(items.nth(1)).toContainText("[600, 900)");
+
+  // 筛选通道 2：只剩通道 2 的建议隔离项
+  await page.getByTestId("channel-filter").selectOption("2");
+  await expect(page.getByTestId("isolation-channel")).toHaveCount(1);
+  items = page.getByTestId("isolation-item");
+  await expect(items).toHaveCount(1);
+  await expect(items.first()).toContainText("顶光");
+
+  // 回到全部通道：两个通道的建议隔离项恢复
+  await page.getByTestId("channel-filter").selectOption("all");
+  await expect(page.getByTestId("isolation-item")).toHaveCount(2);
+});
+
+test("无冲突文件不显示建议隔离", async ({ page }) => {
+  await page.setInputFiles('[data-testid="file-input"]', fixture("clean.json"));
+  await expect(page.getByTestId("status-banner")).toContainText("可放行");
+  await expect(page.getByTestId("isolation-panel")).toHaveCount(0);
+});
+
+test("校验失败后只留错误提示，重传合法文件恢复建议隔离", async ({ page }) => {
+  // 先上传非法文件：只显示错误，无建议隔离
+  await page.setInputFiles('[data-testid="file-input"]', fixture("invalid.json"));
+  await expect(page.getByTestId("error-panel")).toBeVisible();
+  await expect(page.getByTestId("isolation-panel")).toHaveCount(0);
+  await expect(page.getByTestId("report-panel")).toHaveCount(0);
+
+  // 重传链式文件：建议隔离恢复，仍为全局最优的中间一项
+  await page.setInputFiles('[data-testid="file-input"]', fixture("isolation-chain.json"));
+  await expect(page.getByTestId("error-panel")).toHaveCount(0);
+  await expect(page.getByTestId("isolation-item")).toHaveCount(1);
+  await expect(page.getByTestId("isolation-item").first()).toContainText("B-中");
+});

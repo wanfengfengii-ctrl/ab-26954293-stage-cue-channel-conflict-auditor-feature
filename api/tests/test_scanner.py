@@ -3,7 +3,14 @@
 import itertools
 import random
 
-from app.scanner import Conflict, Cue, merge_contention_windows, scan_conflicts
+from app.scanner import (
+    Conflict,
+    Cue,
+    IsolationItem,
+    merge_contention_windows,
+    plan_isolation,
+    scan_conflicts,
+)
 
 
 def cue(name: str, channel: int, start: int, end: int) -> Cue:
@@ -320,3 +327,235 @@ class TestContentionWindows:
             ]
         )
         assert self.window_keys(report) == [(1, 50, 100, 1), (2, 50, 100, 1)]
+
+
+def _isolation_key(item: IsolationItem) -> tuple[int, int]:
+    return (item.channel, item.source_index)
+
+
+def _brute_force_isolation(cues: list[Cue]) -> list[int]:
+    """独立暴力实现：枚举全部保留子集，按三级规则选最优隔离下标序列。"""
+    n = len(cues)
+
+    def compatible(kept: list[int]) -> bool:
+        for a, b in itertools.combinations(kept, 2):
+            x, y = cues[a], cues[b]
+            if (
+                x.channel == y.channel
+                and max(x.start_ms, y.start_ms) < min(x.end_ms, y.end_ms)
+            ):
+                return False
+        return True
+
+    best: tuple[int, int, tuple[int, ...]] | None = None
+    for mask in range(1 << n):
+        kept = [i for i in range(n) if mask & (1 << i)]
+        if not compatible(kept):
+            continue
+        removed = tuple(i for i in range(n) if not (mask & (1 << i)))
+        total = sum(cues[i].end_ms - cues[i].start_ms for i in removed)
+        candidate = (len(removed), total, removed)
+        if best is None or candidate < best:
+            best = candidate
+    return list(best[2])
+
+
+class TestIsolationPlan:
+    def test_no_conflict_empty_plan(self):
+        # 端点相接可共存，无需隔离
+        report = scan_conflicts([cue("A", 1, 0, 100), cue("B", 1, 100, 200)])
+        assert report.isolation_plan == []
+
+    def test_empty_input(self):
+        assert plan_isolation({}) == []
+        assert scan_conflicts([]).isolation_plan == []
+
+    def test_pair_overlap_isolates_shorter_by_duration_tiebreak(self):
+        # 两条重叠：隔离 1 条；时长决胜，隔离更短的那条
+        report = scan_conflicts(
+            [cue("长", 1, 0, 100), cue("短", 1, 50, 60)]
+        )
+        assert [_isolation_key(i) for i in report.isolation_plan] == [(1, 1)]
+        plan = report.isolation_plan[0]
+        assert (plan.cue, plan.start_ms, plan.end_ms) == ("短", 50, 60)
+
+    def test_pair_overlap_same_duration_isolated_by_source_index(self):
+        # 时长相同：隔离源下标升序序列字典序更小者 → 隔离前面的（保留后面的）
+        report = scan_conflicts(
+            [cue("甲", 1, 0, 100), cue("Z", 1, 0, 100)]
+        )
+        assert [i.source_index for i in report.isolation_plan] == [0]
+
+    def test_chain_greedy_trap_isolates_middle(self):
+        # 链式：A[0,10)∩B[5,15)，B∩C[10,20)（A 与 C 端点相接可共存）
+        # 逐冲突任选一端的贪心会隔 A、C 两个，全局最优只隔离中间 B
+        report = scan_conflicts(
+            [
+                cue("A", 1, 0, 10),
+                cue("B", 1, 5, 15),
+                cue("C", 1, 10, 20),
+            ]
+        )
+        assert [i.source_index for i in report.isolation_plan] == [1]
+        assert report.isolation_plan[0].cue == "B"
+
+    def test_long_chain_global_optimum_beats_endpoint_greedy(self):
+        # 纯链 A-B-C-D（相邻重叠、隔一个不冲突）：
+        # 全局最优保留 {B,D}（下标 1、3），隔离 0、2 共 2 条；
+        # 而「逐冲突二选一移除端点再重扫」的贪心在三段链上会移除 3 条。
+        cues = [
+            cue("A", 1, 0, 10),
+            cue("B", 1, 5, 15),
+            cue("C", 1, 12, 22),
+            cue("D", 1, 20, 30),
+        ]
+        assert [i.source_index for i in scan_conflicts(cues).isolation_plan] == [0, 2]
+
+    def test_endpoint_greedy_over_isolates_on_chain(self):
+        # 显式复现验收反例：固定移除每个冲突对中较早一端、循环重扫的贪心，
+        # 在三段链上隔离 2 条；全局解只隔离中间 1 条。
+        cues = [
+            cue("A", 1, 0, 10),
+            cue("B", 1, 5, 15),
+            cue("C", 1, 10, 20),
+        ]
+
+        def greedy_removed() -> set[int]:
+            removed: set[int] = set()
+            changed = True
+            while changed:
+                changed = False
+                for a, b in itertools.combinations(range(len(cues)), 2):
+                    if a in removed or b in removed:
+                        continue
+                    x, y = cues[a], cues[b]
+                    if max(x.start_ms, y.start_ms) < min(x.end_ms, y.end_ms):
+                        removed.add(a)  # 固定移除冲突对较早的一端
+                        changed = True
+                        break
+            return removed
+
+        assert greedy_removed() == {0, 1}
+        assert {i.source_index for i in scan_conflicts(cues).isolation_plan} == {1}
+
+    def test_touching_intervals_can_coexist_so_nothing_isolated(self):
+        # 全部首尾相接：[0,10)[10,20)[20,30)，互不冲突，无需隔离
+        report = scan_conflicts(
+            [
+                cue("A", 1, 0, 10),
+                cue("B", 1, 10, 20),
+                cue("C", 1, 20, 30),
+            ]
+        )
+        assert report.isolation_plan == []
+
+    def test_identical_duplicates_stable_by_source_index(self):
+        # 名称与区间完全相同的重复项：必须隔一个，按源下标稳定决胜（隔 0 留 1）
+        report = scan_conflicts(
+            [
+                cue("X", 1, 0, 100),
+                cue("X", 1, 0, 100),
+            ]
+        )
+        assert [i.source_index for i in report.isolation_plan] == [0]
+
+    def test_identical_duplicates_keep_one_out_of_three(self):
+        # 三条完全相同：保留 1 条即可，隔离前两个（下标 0、1）
+        report = scan_conflicts(
+            [
+                cue("X", 1, 0, 100),
+                cue("X", 1, 0, 100),
+                cue("X", 1, 0, 100),
+            ]
+        )
+        assert [i.source_index for i in report.isolation_plan] == [0, 1]
+
+    def test_duration_tiebreak_prefers_isolating_shorter_cues(self):
+        # 通道上两段互不相连的冲突对，每对都要隔离 1 条（总数恒为 2），
+        # 此时由隔离总时长决胜：每对隔离更短的那条（10+10=20），
+        # 而不是两条长 cue（100+100=200）
+        report = scan_conflicts(
+            [
+                cue("长甲", 1, 0, 100),
+                cue("短甲", 1, 0, 10),
+                cue("短乙", 1, 200, 210),
+                cue("长乙", 1, 200, 300),
+            ]
+        )
+        assert [i.source_index for i in report.isolation_plan] == [1, 2]
+        assert sum(i.end_ms - i.start_ms for i in report.isolation_plan) == 20
+
+    def test_channels_solved_independently(self):
+        report = scan_conflicts(
+            [
+                cue("A", 1, 0, 10),
+                cue("B", 1, 5, 15),
+                cue("C", 2, 0, 10),
+                cue("D", 2, 6, 16),
+            ]
+        )
+        assert [_isolation_key(i) for i in report.isolation_plan] == [(1, 0), (2, 2)]
+
+    def test_plan_items_carry_source_data(self):
+        report = scan_conflicts(
+            [
+                cue("开场", 7, 0, 100),
+                cue("追光", 7, 50, 150),
+            ]
+        )
+        assert report.isolation_plan == [
+            IsolationItem(
+                source_index=0,
+                cue="开场",
+                channel=7,
+                start_ms=0,
+                end_ms=100,
+            )
+        ]
+
+    def test_plan_sorted_by_channel_then_source_index(self):
+        # 源数组中通道 2 的 cue 在前：输出仍必须按通道再按下标
+        cues = [
+            cue("A", 2, 0, 10),   # idx0 ch2
+            cue("B", 2, 5, 15),   # idx1 ch2
+            cue("C", 1, 0, 10),   # idx2 ch1
+            cue("D", 1, 5, 15),   # idx3 ch1
+        ]
+        report = scan_conflicts(cues)
+        keys = [(i.channel, i.source_index) for i in report.isolation_plan]
+        assert keys == [(1, 2), (2, 0)]
+
+    def test_kept_intervals_are_conflict_free(self):
+        # 任意方案落地后，保留下来的 cue 不应再产生任何冲突
+        rng = random.Random(20260918)
+        for _ in range(200):
+            cues = [
+                cue(
+                    chr(ord("A") + rng.randint(0, 4)),
+                    rng.randint(1, 3),
+                    (s := rng.randint(0, 50)),
+                    s + rng.randint(1, 20),
+                )
+                for _ in range(rng.randint(0, 10))
+            ]
+            report = scan_conflicts(cues)
+            removed = {i.source_index for i in report.isolation_plan}
+            kept = [cues[i] for i in range(len(cues)) if i not in removed]
+            assert scan_conflicts(kept).conflicts == []
+
+    def test_matches_brute_force_under_random_inputs(self):
+        rng = random.Random(99)
+        for _ in range(400):
+            cues = []
+            for _ in range(rng.randint(0, 8)):
+                start = rng.randint(0, 30)
+                cues.append(
+                    Cue(
+                        cue=chr(ord("A") + rng.randint(0, 3)),
+                        channel=rng.randint(1, 3),
+                        start_ms=start,
+                        end_ms=start + rng.randint(1, 15),
+                    )
+                )
+            got = sorted(i.source_index for i in scan_conflicts(cues).isolation_plan)
+            assert got == _brute_force_isolation(cues)
